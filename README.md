@@ -105,3 +105,9 @@ Local backup and on-demand restore for the Microsoft Pinyin personal lexicon on 
 - **恢复或回退失败**：保留存档、quarantine/ 和日志，按结果处理，避免反复尝试覆盖。
 
 反馈问题时提供操作步骤、预期结果和实际错误。日志或截图可能包含个人路径和词库信息，分享前先检查并隐去私人内容。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)，版权声明为 Copyright (c) 2026 Melody-rz。
+
+允许使用、修改、分发及商业使用；分发软件副本或其重要部分时，须保留版权声明和许可证。软件按现状提供，不附带质量保证。具体条款以 LICENSE 原文为准。
