@@ -1,0 +1,9 @@
+{
+  "BackupIntervalDays": 7,
+  "KeepCount": 30,
+  "BackupDir": "snapshots",
+  "LoginStart": false,
+  "LoginDelaySeconds": 20,
+  "DeduplicateBackup": true,
+  "MaxLogMB": 5
+}
