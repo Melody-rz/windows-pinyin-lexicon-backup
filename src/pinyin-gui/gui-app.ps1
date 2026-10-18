@@ -237,7 +237,7 @@ try {
     </Border>
 
     <TabControl Grid.Row="2" Margin="0,0,0,10">
-      <TabItem Header="存档记录（最近 10 份；恢复前先选中一份）">
+      <TabItem Header="存档记录（最近 10 份，普通备份优先；恢复前先选中一份）">
         <ListView x:Name="lvSnapshots" SelectionMode="Single">
           <ListView.View>
             <GridView>
@@ -505,7 +505,7 @@ try {
             $lv.ItemsSource = @($snaps | ForEach-Object {
                 [pscustomobject]@{
                     Name = $_.Name
-                    Source = switch ($_.Source) { 'auto' {'自动'} 'manual' {'手动'} 'recovery' {'恢复产物'} default { $_.Source } }
+                    Source = switch ($_.Source) { 'auto' {'自动'} 'manual' {'手动'} 'recovery' {'恢复产物（不可恢复）'} default { $_.Source } }
                     Words = $_.Words
                     Time  = $_.Time
                 }
@@ -616,7 +616,7 @@ try {
              "恢复到：$($ctx.Paths.ImeDir)`n`n" +
              "执行说明：`n" +
              "· 恢复前会把当前数据完整保全到 quarantine 目录（校验通过才继续）`n" +
-             "· 期间会短暂停止输入法相关进程，恢复后自动重启；输入法可能闪断几秒`n" +
+             "· 期间会短暂停止输入法相关进程，恢复后尝试重启；输入法可能短暂中断`n" +
              "· 恢复后逐个文件与备份内容核对（不只看词数）`n`n" +
              "是 = 开始恢复　否 = 取消（当前词库不会有任何改动）"),
             '确认恢复', 'YesNo', 'Warning', [System.Windows.MessageBoxResult]::No)
@@ -630,7 +630,7 @@ try {
                 'success' {
                     Set-OpState "恢复成功：已从 $($snap.Name) 恢复；恢复前数据保全在 $($r.QuarantineName)。"
                     [System.Windows.MessageBox]::Show(
-                        ("恢复完成。`n`n已从 $($snap.Name) 恢复词库；恢复前的数据保全在：`nquarantine\$($r.QuarantineName)`n`n输入法进程已尝试重启；如果输入法没有恢复工作，注销重新登录一次即可。"),
+                        ("恢复完成。`n`n已从 $($snap.Name) 恢复词库；恢复前的数据保全在：`nquarantine\$($r.QuarantineName)`n`n输入法进程已按原运行状态尝试重启。$(@($r.RestartErrors) -join "`n")`n如果输入法没有恢复工作，请注销后重新登录。"),
                         '恢复成功', 'OK', 'Information') | Out-Null
                 }
                 'busy' {
@@ -639,7 +639,7 @@ try {
                 }
                 default {
                     Set-OpState '恢复失败或未完成（详情见弹窗）。'
-                    [System.Windows.MessageBox]::Show((@($r.Errors) -join "`n"), '恢复失败', 'OK', 'Error') | Out-Null
+                    [System.Windows.MessageBox]::Show((@($r.Errors + $r.RestartErrors) -join "`n"), '恢复失败', 'OK', 'Error') | Out-Null
                 }
             }
         } finally {

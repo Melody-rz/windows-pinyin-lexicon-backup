@@ -291,6 +291,96 @@ Start-Sleep -Seconds 10
         Assert-Equal 'E55 主词库内容回到操作前' $ovBefore (Get-FileHash -LiteralPath $ovCtx.Paths.UdlFile).Hash
     } finally { $fsOv.Dispose() }
 
+    # Issue 4：日期交错、未知来源、超过十份恢复产物，普通备份仍优先。
+    $listCtx = New-TestContext -ImeSub 'c-list'
+    $null = New-Item -ItemType Directory -Path $listCtx.Paths.SnapDir -Force
+    $fixtures = @(
+        @{ Name='2026-01-01_000000'; Source='manual' },
+        @{ Name='2026-01-03_000000'; Source='auto' },
+        @{ Name='2026-01-02_000000'; Source='manual' },
+        @{ Name='2099-01-01_000000'; Source='unknown' },
+        @{ Name='recovery-2025-12-31_000000'; Source='recovery' }
+    )
+    foreach ($day in 1..12) { $fixtures += @{ Name=('recovery-2026-02-{0:00}_000000' -f $day); Source='recovery' } }
+    foreach ($f in $fixtures) {
+        $dir = Join-Path $listCtx.Paths.SnapDir $f.Name
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        @{ source=$f.Source; words=120; time='2026-01-01 00:00:00' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'meta.json') -Encoding UTF8
+    }
+    $shown = @(Get-EngineSnapshots -Ctx $listCtx -MaxCount 10)
+    Assert-Equal 'I4 截断十份' 10 $shown.Count
+    Assert-Equal 'I4 普通备份按目录时间从新到旧' '2026-01-03_000000,2026-01-02_000000,2026-01-01_000000' (($shown | Select-Object -First 3 | ForEach-Object Name) -join ',')
+    Assert-Equal 'I4 健康基线仍为普通备份' '2026-01-03_000000' (Get-EngineLatestBackup -Ctx $listCtx).Name
+    Assert-True 'I4 时间交错的恢复产物全部在普通备份之后' (@((Get-EngineSnapshots -Ctx $listCtx | Select-Object -Skip 3) | Where-Object Source -in @('auto','manual')).Count -eq 0)
+    $plan = Get-EngineRotationPlan -Ctx $listCtx -KeepCount 1
+    Assert-True 'I4 清理只包含旧的两份普通备份' ($plan.Remove.Count -eq 2 -and @($plan.Remove | Where-Object Source -notin @('auto','manual')).Count -eq 0)
+    foreach ($f in @($fixtures | Where-Object Source -in @('auto','manual'))) {
+        Remove-Item -LiteralPath (Join-Path $listCtx.Paths.SnapDir $f.Name) -Recurse -Force
+    }
+    $onlyRecovery = @(Get-EngineSnapshots -Ctx $listCtx -MaxCount 10)
+    Assert-Equal 'I4 无普通备份仍显示其他记录' 10 $onlyRecovery.Count
+    Assert-True 'I4 无普通备份无健康基线' ($null -eq (Get-EngineLatestBackup -Ctx $listCtx))
+    Assert-Equal 'I4 恢复产物仍拒绝恢复' 'failed' (Invoke-EngineRestore -Ctx $listCtx -SnapshotName 'recovery-2026-02-12_000000').Outcome
+
+    # Issue 2：模块内部模拟所有进程边界，禁止启动或停止真实进程。
+    $engine = Get-Module engine
+    $paths = & $engine {
+        $ctx = @{ TestMode=$false }
+        return @((Get-EngineProcessPath -Ctx $ctx -Name 'ChsIME'), (Get-EngineProcessPath -Ctx $ctx -Name 'ctfmon'))
+    }
+    Assert-Equal 'I2 微软拼音系统路径' (Join-Path $env:windir 'System32\InputMethod\CHS\ChsIME.exe') $paths[0]
+    Assert-Equal 'I2 辅助进程系统路径' (Join-Path $env:windir 'System32\ctfmon.exe') $paths[1]
+    Assert-True 'I2 测试上下文不解析真实程序' ($null -eq (& $engine { Get-EngineProcessPath -Ctx @{ TestMode=$true } -Name 'ChsIME' }))
+    $restartCtx = New-TestContext -ImeSub 'c-restart'
+    $restartBackup = Invoke-EngineBackup -Ctx $restartCtx -Manual
+    & $engine {
+        $script:SavedResolver = ${function:Get-EngineProcessPath}
+        $script:MockStarts = @(); $script:MockStops = @(); $script:MockFail = $false; $script:MockRunning = $true
+        function script:Get-Process {
+            param($Name, $ErrorAction)
+            $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+            # 当前会话与其他会话各一份；停止后只剩其他会话。
+            if ($script:MockRunning) { [pscustomobject]@{ Id=123; SessionId=$session } }
+            [pscustomobject]@{ Id=456; SessionId=($session + 1) }
+        }
+        function script:Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:MockStops += $Id; $script:MockRunning = $false }
+        function script:Start-Process {
+            param($FilePath, $ErrorAction)
+            $script:MockStarts += $FilePath
+            if ($script:MockFail) { throw '模拟启动失败' }
+        }
+        function script:Get-EngineProcessPath { param($Ctx, $Name) return $script:MockPath }
+    }
+    try {
+        $mockExe = Join-Path $testRoot 'mock program.exe'
+        Set-Content -LiteralPath $mockExe -Value 'fake executable; never executed'
+        & $engine { param($path) $script:MockPath=$path } $mockExe
+        $restored = Invoke-EngineRestore -Ctx $restartCtx -SnapshotName $restartBackup.SnapshotName
+        Assert-Equal 'I2 数据恢复成功' 'success' $restored.Outcome
+        Assert-Equal 'I2 重启单独报告成功' 'success' $restored.RestartOutcome
+        $calls = & $engine { return @{ Starts=@($script:MockStarts); Stops=@($script:MockStops) } }
+        Assert-Equal 'I2 传入明确路径（含空格）' $mockExe $calls.Starts[0]
+        Assert-Equal 'I2 只停止当前会话进程' '123' ($calls.Stops -join ',')
+        & $engine { $script:MockStarts=@(); $script:MockFail=$true; $script:MockRunning=$true }
+        $restored = Invoke-EngineRestore -Ctx $restartCtx -SnapshotName $restartBackup.SnapshotName
+        Assert-Equal 'I2 启动失败不改变数据恢复成功结果' 'success' $restored.Outcome
+        Assert-True 'I2 启动失败单独报告' ($restored.RestartOutcome -eq 'failed' -and $restored.RestartErrors.Count -gt 0)
+        $log = Get-Content -LiteralPath $restartCtx.Paths.LogFile -Raw
+        Assert-True 'I2 日志包含程序路径与启动失败原因' ($log.Contains($mockExe.Replace('\','\\')) -and $log.Contains('模拟启动失败'))
+        $missing = & $engine { param($ctx) $script:MockPath='Z:\missing.exe'; Restart-EngineProcesses -Ctx $ctx -Names @('PinyinFakeIME') } $restartCtx
+        Assert-True 'I2 程序缺失被报告' ($missing.Errors.Count -eq 1 -and $missing.Errors[0] -like '*不存在*')
+        $noRestart = & $engine { param($ctx) $script:MockStarts=@(); Restart-EngineProcesses -Ctx $ctx -Names @() } $restartCtx
+        Assert-Equal 'I2 原先未运行无需重启' 'not-needed' $noRestart.Outcome
+        Assert-Equal 'I2 无需重启没有启动调用' 0 (& $engine { $script:MockStarts.Count })
+        $alreadyRunning = & $engine { param($ctx) $script:MockRunning=$true; Restart-EngineProcesses -Ctx $ctx -Names @('PinyinFakeIME') } $restartCtx
+        Assert-Equal 'I2 系统已重启则不重复启动' 0 (& $engine { $script:MockStarts.Count })
+    } finally {
+        & $engine {
+            Remove-Item Function:script:Get-Process,Function:script:Stop-Process,Function:script:Start-Process,Function:script:Get-EngineProcessPath
+            Set-Item Function:script:Get-EngineProcessPath $script:SavedResolver
+        }
+    }
+
     # ================= 挂起 =================
     Write-Output ''
     Write-Output '---- Suspend ----'

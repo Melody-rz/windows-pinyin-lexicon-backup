@@ -170,13 +170,13 @@ try {
                 Show-CheckAlert -Topic 'restore-done' -Icon 'Information' -Message (
                     "恢复完成：已从 $($latest.Name) 恢复词库。`n`n" +
                     "恢复前的数据已保全到 quarantine 目录（$($rr.QuarantineName)），确认无误后可在主程序中查看。`n" +
-                    "输入法进程已尝试重新启动；如果输入法未恢复工作，请注销重新登录一次。"
+                    "输入法进程已按原运行状态尝试重新启动。$(@($rr.RestartErrors) -join "`n")`n如果输入法未恢复工作，请注销后重新登录。"
                 ) | Out-Null
                 exit 0
             } else {
                 Show-CheckAlert -Topic 'restore-failed' -Icon 'Error' -Message (
                     "恢复没有完成。`n`n" +
-                    ($rr.Errors -join "`n") + "`n`n" +
+                    (@($rr.Errors + $rr.RestartErrors) -join "`n") + "`n`n" +
                     "请按上面的恢复或回退结果处理，并保留现场文件；可打开主程序查看日志。"
                 ) | Out-Null
                 exit 2
