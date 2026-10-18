@@ -152,7 +152,7 @@ function Get-EngineLexiconStatus {
 
 # ============ 存档枚举 ============
 function Get-EngineSnapshots {
-    <# 列出 SnapDir 下的正式存档（含有效 meta.json），按名称倒序（新→旧）。
+    <# 列出 SnapDir 下的正式存档（含有效 meta.json），普通备份优先，各类按目录时间戳倒序（新→旧）。
        .pending-* 半成品目录与无 meta 目录不返回（它们不是成功备份）。 #>
     param(
         [Parameter(Mandatory = $true)][hashtable]$Ctx,
@@ -178,6 +178,8 @@ function Get-EngineSnapshots {
             }
         } catch { continue }
     }
+    $out = @($out | Sort-Object @{ Expression = { if ($_.Source -in @('auto', 'manual')) { 0 } else { 1 } } },
+        @{ Expression = { $_.Name -replace '^recovery-', '' }; Descending = $true })
     if ($MaxCount -gt 0 -and $out.Count -gt $MaxCount) {
         return @($out | Select-Object -First $MaxCount)
     }
@@ -514,6 +516,43 @@ function Invoke-EngineRotationInner {
     return @{ Cleaned = $cleaned; Errors = $errors }
 }
 
+# 只映射已知系统程序；测试上下文默认禁止解析真实程序路径。
+function Get-EngineProcessPath {
+    param([hashtable]$Ctx, [string]$Name)
+    if ($Ctx.TestMode) { return $null }
+    switch ($Name) {
+        'ChsIME' { return (Join-Path $env:windir 'System32\InputMethod\CHS\ChsIME.exe') }
+        'ctfmon' { return (Join-Path $env:windir 'System32\ctfmon.exe') }
+        default { return $null }
+    }
+}
+
+function Restart-EngineProcesses {
+    param([hashtable]$Ctx, [string[]]$Names = @())
+    $errors = @()
+    foreach ($name in @($Names | Select-Object -Unique)) {
+        $path = $null
+        try {
+            # 系统可能已自动重启该进程；只检查当前会话。
+            $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+            $running = @(Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session })
+            if ($running.Count -gt 0) { continue }
+            $path = Get-EngineProcessPath -Ctx $Ctx -Name $name
+            if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "系统程序不存在或路径未配置：$path"
+            }
+            $null = Start-Process -FilePath $path -ErrorAction Stop
+            Write-EngineLog -Ctx $Ctx -Action 'process-restart' -Result 'success' -Detail "$name；路径=$path"
+        } catch {
+            $detail = "输入法进程重启失败：$name；路径=$path；原因=$($_.Exception.Message)"
+            $errors += $detail
+            Write-EngineLog -Ctx $Ctx -Action 'process-restart' -Result 'failed' -Detail $detail
+        }
+    }
+    $outcome = if ($Names.Count -eq 0) { 'not-needed' } elseif ($errors.Count -gt 0) { 'failed' } else { 'success' }
+    return @{ Outcome = $outcome; Errors = $errors }
+}
+
 # ============ 恢复 ============
 function Invoke-EngineRestore {
     <# 恢复到指定存档（必须精确存档名）。返回结构化结果（不弹窗）。
@@ -681,13 +720,7 @@ function Invoke-EngineRestoreInner {
         }
         if ($bad.Count -gt 0) { throw ("恢复结果核对未通过：`n" + ($bad -join "`n")) }
 
-        # 成功：尽力重启输入法（原在跑的），记录 recovery 存档
-        foreach ($pn in ($wasRunning | Select-Object -Unique)) {
-            try {
-                if ($pn -eq $Ctx.HelperProcessName) { Start-Process "$($pn).exe" -ErrorAction SilentlyContinue }
-                else { Start-Process "$($pn).exe" -ErrorAction SilentlyContinue }
-            } catch { }
-        }
+        # 数据恢复与进程重启分别报告。
         $lexAfter = Get-EngineLexiconStatus -Ctx $Ctx
         $recMeta = @{
             source = 'recovery'
@@ -709,7 +742,9 @@ function Invoke-EngineRestoreInner {
             $recMeta | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $recDir 'meta.json') -Encoding UTF8
         }
         Write-EngineLog -Ctx $Ctx -Action 'recovery' -Result 'success' -Detail "从 $SnapshotName（$($snap.Words) 词，估算）恢复成功，现 $($lexAfter.Words) 词（估算）；恢复前现场保全在 $qName"
+        $restart = Restart-EngineProcesses -Ctx $Ctx -Names $wasRunning
         return @{ Outcome = 'success'; SnapshotName = $snap.Name; QuarantineName = $qName
+                  RestartOutcome = $restart.Outcome; RestartErrors = @($restart.Errors)
                   WordsAfter = $lexAfter.Words; Errors = @() }
     } catch {
         $restoreErr = $_.Exception.Message
@@ -738,17 +773,16 @@ function Invoke-EngineRestoreInner {
         } catch {
             $rollbackErr = "回退过程出错：$($_.Exception.Message)"
         }
-        # 尽力重启输入法（不能只在成功路径重启）
-        foreach ($pn in ($wasRunning | Select-Object -Unique)) {
-            try { Start-Process "$($pn).exe" -ErrorAction SilentlyContinue } catch { }
-        }
+        $restart = Restart-EngineProcesses -Ctx $Ctx -Names $wasRunning
         if ($rollbackErr) {
             Write-EngineLog -Ctx $Ctx -Action 'recovery' -Result 'failed-rollback-failed' -Detail "覆盖失败：$restoreErr；$rollbackErr 现场保全在 $qName"
             return @{ Outcome = 'failed'; SnapshotName = $snap.Name; QuarantineName = $qName
+                      RestartOutcome = $restart.Outcome; RestartErrors = @($restart.Errors)
                       Errors = @("恢复失败：$restoreErr`n`n回退也未完全成功：$rollbackErr`n`n恢复前现场已保留：$qPath`n所用存档未受影响：$($snap.Dir)`n请勿删除保全目录，可据此手工处理。") }
         }
         Write-EngineLog -Ctx $Ctx -Action 'recovery' -Result 'failed-rollback' -Detail "覆盖失败：$restoreErr；已回退，现场保全在 $qName"
         return @{ Outcome = 'failed'; SnapshotName = $snap.Name; QuarantineName = $qName
+                      RestartOutcome = $restart.Outcome; RestartErrors = @($restart.Errors)
                   Errors = @("恢复失败：$restoreErr`n`n已用恢复前的数据回退，词库回到操作前状态。`n恢复前现场另存一份：$qPath（确认无误后可删除）") }
     }
 }

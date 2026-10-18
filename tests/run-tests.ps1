@@ -115,6 +115,29 @@ try {
     $rawText = Get-Content $savePath -Raw
     Assert-True 'T07e JSON 不含注释符号'           ($rawText -notmatch '//')
 
+    # Issue 1：模拟文本框草稿，并直接检查 JSON 类型，避免回读转换掩盖错误。
+    $draft = Get-GuiConfigDefaults -BaseDir $testRoot
+    $draft.BackupIntervalDays = '12'; $draft.KeepCount = '18'; $draft.LoginDelaySeconds = '25'
+    $draft.MaxLogMB = '2.5'; $draft.LoginStart = $true; $draft.DeduplicateBackup = $false
+    $draftPath = Join-Path $testRoot 'draft.json'
+    Assert-True 'I1 文本草稿保存成功' (Save-GuiConfig -Path $draftPath -Config $draft).Success
+    $json = Get-Content -LiteralPath $draftPath -Raw | ConvertFrom-Json
+    foreach ($key in @('BackupIntervalDays', 'KeepCount', 'LoginDelaySeconds')) {
+        Assert-True "I1 $key 为 JSON 整数" ($json.$key -is [int] -and $json.$key -eq [int]$draft[$key])
+    }
+    Assert-True 'I1 布尔类型和值保留' ($json.LoginStart -is [bool] -and $json.LoginStart -and $json.DeduplicateBackup -is [bool] -and -not $json.DeduplicateBackup)
+    Assert-Equal 'I1 小数保留' 2.5 $json.MaxLogMB
+    $legacyPath = Join-Path $testRoot 'legacy.json'
+    '{"BackupIntervalDays":"12","KeepCount":"18","LoginDelaySeconds":"25"}' | Set-Content -LiteralPath $legacyPath -Encoding UTF8
+    $legacy = Read-GuiConfig -Path $legacyPath -BaseDir $testRoot
+    Assert-True 'I1 旧数字字符串可读' ($legacy.Errors.Count -eq 0 -and $legacy.Config.KeepCount -is [int] -and $legacy.Config.KeepCount -eq 18)
+    $beforeDraft = [IO.File]::ReadAllText($draftPath)
+    foreach ($invalid in @('1.5', 'abc', '9999999999999999999999', '0')) {
+        $draft.KeepCount = $invalid
+        Assert-True "I1 非法文本 $invalid 被拒绝" (-not (Save-GuiConfig -Path $draftPath -Config $draft).Success)
+        Assert-Equal 'I1 原配置未覆盖' $beforeDraft ([IO.File]::ReadAllText($draftPath))
+    }
+
     # T08 保存：非法配置失败且旧文件不动
     $before = Get-Content $savePath -Raw
     $badSave = Get-GuiConfigDefaults -BaseDir $testRoot

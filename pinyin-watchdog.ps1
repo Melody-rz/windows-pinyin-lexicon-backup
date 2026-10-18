@@ -65,8 +65,10 @@ if ($RestoreFrom) {
     $r = Invoke-EngineRestore -Ctx $ctx -SnapshotName $s.Name
     if ($r.Outcome -eq 'success') {
         Write-Output "已恢复到 $($s.Name)；恢复前数据保全在 quarantine\$($r.QuarantineName)。"
+        if ($r.RestartErrors) { Write-Output ($r.RestartErrors -join "`n") }
         exit 0
     } else {
+        if ($r.RestartErrors) { Write-Output ($r.RestartErrors -join "`n") }
         Write-Output ($r.Errors -join "`n")
         exit 1
     }

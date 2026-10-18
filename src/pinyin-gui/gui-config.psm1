@@ -177,7 +177,7 @@ function ConvertTo-GuiConfigJson {
     $ordered = [ordered]@{}
     foreach ($item in $script:GuiConfigSchema) {
         $value = $Config[$item.Key]
-        if ($item.Type -eq 'number') { $value = [double]$value } else { $value = $value }
+        $value = ConvertTo-GuiConfigValue -Type $item.Type -Value $value
         $ordered[$item.Key] = $value
     }
     return ($ordered | ConvertTo-Json)
